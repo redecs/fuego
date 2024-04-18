@@ -43,10 +43,18 @@ func main() {
 	myACME := certmagic.NewACMEIssuer(magic, certmagic.DefaultACME)
 
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprintf("%s:80", domainName), myACME.HTTPChallengeHandler(http.NewServeMux())); err != nil {
+		rdr := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://"+domainName+r.RequestURI, http.StatusMovedPermanently)
+		})
+		if err := http.ListenAndServe(fmt.Sprintf("%s:80", domainName), myACME.HTTPChallengeHandler(rdr)); err != nil {
 			log.Println("http listener error: ", err)
 		}
 	}()
+
+	err := magic.ManageSync(ctx, []string{domainName})
+	if err != nil {
+		log.Fatalln("error getting certs from ACME server: ", err)
+	}
 
 	tlsConfig := magic.TLSConfig()
 	// be sure to customize NextProtos if serving a specific
