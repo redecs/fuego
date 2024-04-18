@@ -49,6 +49,7 @@ func main() {
 
 	s := fuego.NewServer(
 		fuego.WithAddr(fmt.Sprintf("%s:443", domainName)),
+		fuego.WithTLSConfig(tlsConfig),
 	)
 
 	fuego.Use(s, cors.Default().Handler)
