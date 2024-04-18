@@ -31,6 +31,7 @@ var domainName string
 
 func main() {
 	flag.StringVar(&domainName, "d", "", "domain name to use for TLS")
+	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
