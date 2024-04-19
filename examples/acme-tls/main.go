@@ -21,6 +21,8 @@ var (
 	acmeEmail  string
 )
 
+// main starts a simple Fuego 🔥 server with ACME certificates from Let's Encrypt
+// It also uses a simple HTTP server to solve the ACME HTTP challenges and redirect any HTTP request to HTTPS
 func main() {
 	flag.StringVar(&domainName, "td", "", "domain name to use for TLS")
 	flag.StringVar(&acmeEmail, "te", "", "email address for ACME Server")
@@ -31,7 +33,10 @@ func main() {
 
 	certmagic.DefaultACME.Agreed = true
 	certmagic.DefaultACME.Email = acmeEmail
-	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA // be nice with Let's Encrypt, use staging server for demo
+
+	// avoid  Let's Encrypt rate limits during testing
+	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA // remove this for real certificates
+
 	magic := certmagic.NewDefault()
 	myACME := certmagic.NewACMEIssuer(magic, certmagic.DefaultACME)
 
