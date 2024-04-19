@@ -70,7 +70,6 @@ func main() {
 
 	// use the updated TLS configuration that includes the ACME certificates
 	httpsServer.Server.TLSConfig = magic.TLSConfig()
-	log.Printf("DEBUG: %#v\n", httpsServer.Server.TLSConfig.NextProtos)
 	httpsServer.Server.TLSConfig.NextProtos = append([]string{"h2", "http/1.1"}, httpsServer.Server.TLSConfig.NextProtos...)
 
 	fuego.Get(httpsServer, "/", func(_ fuego.ContextNoBody) (string, error) {
