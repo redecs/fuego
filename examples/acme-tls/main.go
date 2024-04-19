@@ -6,132 +6,89 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-fuego/fuego"
-	"github.com/rs/cors"
 )
 
-type Received struct {
-	Name string `json:"name" validate:"required"`
-}
-
-type MyResponse struct {
-	Message       string `json:"message"`
-	BestFramework string `json:"best"`
-}
-
-var domainName string
+var (
+	domainName string
+	acmeEmail  string
+)
 
 func main() {
-	flag.StringVar(&domainName, "d", "", "domain name to use for TLS")
+	flag.StringVar(&domainName, "td", "", "domain name to use for TLS")
+	flag.StringVar(&acmeEmail, "te", "", "email address for ACME Server")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	certmagic.DefaultACME.Agreed = true
-	certmagic.DefaultACME.Email = fmt.Sprintf("webmaster@%s", domainName)
-	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
+	certmagic.DefaultACME.Email = acmeEmail
+	certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA // be nice with Let's Encrypt, use staging server for demo
 	magic := certmagic.NewDefault()
 	myACME := certmagic.NewACMEIssuer(magic, certmagic.DefaultACME)
 
+	// create a simple HTTP server
+	tlsHttpServer := &http.Server{
+		Addr:              fmt.Sprintf("%s:80", domainName),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       5 * time.Second,
+		BaseContext:       func(listener net.Listener) context.Context { return ctx },
+	}
+	httpRedirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://"+domainName+r.RequestURI, http.StatusMovedPermanently)
+	})
+	tlsHttpServer.Handler = myACME.HTTPChallengeHandler(httpRedirectHandler)
+	// async start HTTP listener to redirect to HTTPS and solve ACME HTTP challenges
 	go func() {
-		rdr := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "https://"+domainName+r.RequestURI, http.StatusMovedPermanently)
-		})
-		if err := http.ListenAndServe(fmt.Sprintf("%s:80", domainName), myACME.HTTPChallengeHandler(rdr)); err != nil {
+		if err := tlsHttpServer.ListenAndServe(); err != nil {
 			log.Println("http listener error: ", err)
 		}
 	}()
 
+	// get or renew certificate from the ACME server
 	err := magic.ManageSync(ctx, []string{domainName})
 	if err != nil {
 		log.Fatalln("error getting certs from ACME server: ", err)
 	}
 
-	tlsConfig := magic.TLSConfig()
-	// be sure to customize NextProtos if serving a specific
-	// application protocol after the TLS handshake, for example:
-	tlsConfig.NextProtos = append([]string{"h2", "http/1.1"}, tlsConfig.NextProtos...)
+	httpsServer := fuego.NewServer(fuego.WithAddr(fmt.Sprintf("%s:443", domainName)))
 
-	s := fuego.NewServer(
-		fuego.WithAddr(fmt.Sprintf("%s:443", domainName)),
-		fuego.WithTLSConfig(tlsConfig),
-	)
+	// use the updated TLS configuration that includes the ACME certificates
+	httpsServer.Server.TLSConfig = magic.TLSConfig()
+	log.Printf("DEBUG: %#v\n", httpsServer.Server.TLSConfig.NextProtos)
+	httpsServer.Server.TLSConfig.NextProtos = append([]string{"h2", "http/1.1"}, httpsServer.Server.TLSConfig.NextProtos...)
 
-	fuego.Use(s, cors.Default().Handler)
-	//fuego.Use(s, myACME.HTTPChallengeHandler)
-	fuego.Use(s, chiMiddleware.Compress(5, "text/html", "text/css"))
-
-	// Fuego 🔥 handler with automatic OpenAPI generation, validation, (de)serialization and error handling
-	fuego.Post(s, "/", func(c *fuego.ContextWithBody[Received]) (MyResponse, error) {
-		data, err := c.Body()
-		if err != nil {
-			return MyResponse{}, err
-		}
-
-		// read the request header test
-		if c.Request().Header.Get("test") != "test" {
-			return MyResponse{}, errors.New("test header not found")
-		}
-
-		c.Response().Header().Set("X-Hello", "World")
-
-		return MyResponse{
-			Message:       "Hello, " + data.Name,
-			BestFramework: "Fuego!",
-		}, nil
-	}).
-		Description("Say hello to the world").
-		Header("test", "Just a test header").
-		Cookie("test", "A Cookie!")
-
-	// Standard net/http handler with automatic OpenAPI route declaration
-	fuego.GetStd(s, "/std", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("Hello, World!"))
+	fuego.Get(httpsServer, "/", func(_ fuego.ContextNoBody) (string, error) {
+		return "Hello, World!", nil
 	})
 
+	// async start Fuego 🔥 in TLS mode
 	go func() {
-		log.Printf("server listening on %s\n", s.Server.Addr)
-		if err := s.Run(); !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server run error: %v", err)
+		log.Printf("server listening on %s\n", httpsServer.Server.Addr)
+		if err := httpsServer.Run(); !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("tls listener error: %v", err)
 		}
 	}()
 
-	<-ctx.Done()
+	<-ctx.Done() // Wait for SIGINT or SIGTERM
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.Server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutodwn error: %v", err)
+	if err := httpsServer.Server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutodwn error: %v", err)
+	}
+	if err := tlsHttpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("tls server shutodwn error: %v", err)
 	}
 	log.Println("Server stopped")
 }
-
-// InTransform will be called when using c.Body().
-// It can be used to transform the entity and raise custom errors
-func (r *Received) InTransform(context.Context) error {
-	r.Name = strings.ToLower(r.Name)
-	if r.Name == "fuego" {
-		return errors.New("fuego is not a name")
-	}
-	return nil
-}
-
-// OutTransform will be called before sending data
-func (r *MyResponse) OutTransform(context.Context) error {
-	r.Message = strings.ToUpper(r.Message)
-	return nil
-}
-
-var (
-	_ fuego.InTransformer  = &Received{}   // Ensure that *Received implements fuego.InTransformer
-	_ fuego.OutTransformer = &MyResponse{} // Ensure that *MyResponse implements fuego.OutTransformer
-)
