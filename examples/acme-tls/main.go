@@ -79,7 +79,9 @@ func main() {
 	// async start Fuego 🔥 in TLS mode
 	go func() {
 		log.Printf("server listening on %s\n", httpsServer.Server.Addr)
-		if err := httpsServer.Run(); !errors.Is(err, http.ErrServerClosed) {
+		// no need for cert and key files, since those are in tls.Config from certmagic
+		err := httpsServer.RunTLS("", "")
+		if !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("tls listener error: %v", err)
 		}
 	}()
